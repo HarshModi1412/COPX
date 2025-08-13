@@ -18,50 +18,48 @@ PID_BY_LABEL   = {f"{p['product_id']} — {p['name']}": p['product_id'] for p in
 NAME_BY_LABEL  = {f"{p['product_id']} — {p['name']}": p['name']      for p in PRODUCTS}
 PRICE_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['price']     for p in PRODUCTS}
 
+
 def get_or_create_customer(customer_number: str, customer_name: str | None):
+    """Return (customer_id, customer_name). Create a new customer if needed."""
     customer_number = (customer_number or "").strip()
     if not customer_number:
         return None, None
 
-    # Try existing
-    row = query_db("SELECT customer_id, customer_name FROM customers WHERE customer_number=?",
-                   (customer_number,), fetch=True)
+    # Existing?
+    row = query_db(
+        "SELECT customer_id, customer_name FROM customers WHERE customer_number=?",
+        (customer_number,), fetch=True
+    )
     if row:
         return row[0][0], row[0][1]
 
-    # Need name to create
+    # Need a name to create
     if not customer_name or not customer_name.strip():
         return None, None
 
-    # Create new
+    # Create new with sequential ID
     count = query_db("SELECT COUNT(*) FROM customers", fetch=True)[0][0]
     new_id = f"CUST-{count + 1:04d}"
-    query_db("INSERT INTO customers (customer_id, customer_number, customer_name) VALUES (?, ?, ?)",
-             (new_id, customer_number, customer_name.strip()))
+    query_db(
+        "INSERT INTO customers (customer_id, customer_number, customer_name) VALUES (?, ?, ?)",
+        (new_id, customer_number, customer_name.strip())
+    )
     return new_id, customer_name.strip()
 
-def ensure_inventory_rows_exist(ingredients):
-    """Make sure every BOM ingredient exists in inventory with correct unit."""
+
+def ensure_inventory_rows_exist(ingredients: list[str]):
+    """Ensure each ingredient exists in inventory; if missing, insert with quantity=0 and correct unit."""
     for ing in ingredients:
         unit = INGREDIENT_UNITS.get(ing, "")
+        # SQL Server: upsert with MERGE to avoid PK violation
         query_db("""
-            INSERT INTO inventory (ingredient, quantity, unit)
-            VALUES (?, 0, ?)
-            ON CONFLICT(ingredient) DO NOTHING
+            MERGE inventory AS target
+            USING (SELECT ? AS ingredient, CAST(0 AS FLOAT) AS quantity, ? AS unit) AS source
+            ON target.ingredient = source.ingredient
+            WHEN NOT MATCHED THEN
+                INSERT (ingredient, quantity, unit) VALUES (source.ingredient, source.quantity, source.unit);
         """, (ing, unit))
 
-def load_inventory_df():
-    df = fetch_df("SELECT ingredient AS Ingredient, quantity AS Quantity, unit AS Unit FROM inventory")
-    return df
-
-def save_inventory_df(df: pd.DataFrame):
-    # write back (overwrite existing rows)
-    for _, row in df.iterrows():
-        query_db("""
-            INSERT INTO inventory (ingredient, quantity, unit)
-            VALUES (?, ?, ?)
-            ON CONFLICT(ingredient) DO UPDATE SET quantity=excluded.quantity, unit=excluded.unit
-        """, (row["Ingredient"], float(row["Quantity"]), row.get("Unit", "")))
 
 def billing_page():
     init_db()
@@ -72,6 +70,7 @@ def billing_page():
 
     st.header("🧾 Cafe Billing")
 
+    # Add-to-cart UI
     with st.form("add_item_form", clear_on_submit=True):
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -94,6 +93,7 @@ def billing_page():
     st.subheader("🛒 Current Cart")
     st.dataframe(pd.DataFrame(st.session_state.cart), use_container_width=True)
 
+    # Customer
     st.subheader("👤 Customer Details")
     customer_number = st.text_input("Customer Number").strip()
     auto_name = None
@@ -108,12 +108,15 @@ def billing_page():
         else:
             new_name = st.text_input("Customer Name (New Customer)")
 
+    # Save invoice
     if st.button("💾 Save Invoice"):
         if not customer_number:
             st.warning("Customer number is empty.")
             return
 
-        cust_id, cust_name = get_or_create_customer(customer_number, new_name if not auto_name else auto_name)
+        cust_id, cust_name = get_or_create_customer(
+            customer_number, new_name if not auto_name else auto_name
+        )
         if cust_id is None:
             st.error("Customer name required for new customer.")
             return
@@ -121,29 +124,27 @@ def billing_page():
         invoice_id = str(uuid.uuid4())
         ts = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Insert invoice line items
+        # Insert invoice line items (timestamp is a reserved word, bracket it)
         for item in st.session_state.cart:
             query_db("""
                 INSERT INTO billing
-                (invoice_id, customer_id, product_id, product_name, quantity, unit_price, total, timestamp)
+                (invoice_id, customer_id, product_id, product_name, quantity, unit_price, total, [timestamp])
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (invoice_id, cust_id, item["product_id"], item["product_name"],
-                  int(item["quantity"]), float(item["unit_price"]), float(item["total"]), ts))
+            """, (
+                invoice_id, cust_id, item["product_id"], item["product_name"],
+                int(item["quantity"]), float(item["unit_price"]), float(item["total"]), ts
+            ))
 
-        # Deduct inventory using BOM
+        # Deduct inventory using BOM — do it with UPDATE so we don't read/write whole frames
         deduction = calculate_deduction(st.session_state.cart)
         if deduction:
-            # Ensure inventory rows exist for all ingredients
             ensure_inventory_rows_exist(list(deduction.keys()))
-            inv_df = load_inventory_df()
-            # work in pandas for clarity
             for ing, dec_qty in deduction.items():
-                inv_df.loc[inv_df["Ingredient"] == ing, "Quantity"] = \
-                    inv_df.loc[inv_df["Ingredient"] == ing, "Quantity"].fillna(0) - float(dec_qty)
-            save_inventory_df(inv_df)
+                # Safe arithmetic update; ensure row exists first (done above)
+                query_db(
+                    "UPDATE inventory SET quantity = ISNULL(quantity, 0) - ? WHERE ingredient = ?",
+                    (float(dec_qty), ing)
+                )
 
-            st.success(f"Invoice {invoice_id} saved for Customer {cust_id}. Inventory deducted.")
-            st.subheader("📉 Updated Inventory")
-            st.dataframe(inv_df, use_container_width=True)
-
+        st.success(f"Invoice {invoice_id} saved for Customer {cust_id}. Inventory updated.")
         st.session_state.cart = []
