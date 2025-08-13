@@ -1,3 +1,4 @@
+# inventory.py
 import streamlit as st
 import pandas as pd
 from db import init_db, fetch_df, query_db
@@ -9,59 +10,63 @@ ADMIN_PASS = "456"
 
 
 def ensure_safety_stock_column():
-    """Add safety_stock column to inventory if it doesn't exist."""
+    """Add safety_stock column to inventory if it doesn't exist (SQL Server)."""
     query_db("""
         IF COL_LENGTH('inventory', 'safety_stock') IS NULL
         BEGIN
-            ALTER TABLE inventory ADD safety_stock FLOAT DEFAULT 0
+            ALTER TABLE inventory ADD safety_stock FLOAT NULL CONSTRAINT DF_inventory_safety_stock DEFAULT 0 WITH VALUES
         END
     """, ignore_errors=True)
 
 
-def reset_inventory_from_bom():
+def sync_inventory_with_bom():
     """
-    Completely reset the inventory table to match DEFAULT_BOM.
-    All old records will be deleted and replaced.
+    Add any BOM ingredients that are missing from inventory (no deletes).
+    Returns the full list of BOM ingredients (for ordering/display).
     """
     ensure_bom_seeded()
     ensure_safety_stock_column()
 
     ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
+
+    # Insert only the missing ones via MERGE
+    for ing in ingredients:
+        unit = INGREDIENT_UNITS.get(ing, "")
+        query_db("""
+            MERGE inventory AS target
+            USING (SELECT ? AS ingredient, CAST(0 AS FLOAT) AS quantity, ? AS unit, CAST(0 AS FLOAT) AS safety_stock) AS source
+            ON target.ingredient = source.ingredient
+            WHEN NOT MATCHED THEN
+                INSERT (ingredient, quantity, unit, safety_stock)
+                VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
+        """, (ing, unit))
+
+    return list(ingredients)
+
+
+def reset_inventory_from_bom():
+    """
+    Completely replace inventory contents from BOM (admin action).
+    """
+    ensure_bom_seeded()
+    ensure_safety_stock_column()
+
+    ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
+
+    # Safer than TRUNCATE (in case of FKs)
     query_db("DELETE FROM inventory")
 
     for ing in ingredients:
         query_db("""
             INSERT INTO inventory (ingredient, quantity, unit, safety_stock)
             VALUES (?, ?, ?, ?)
-        """, (ing, 0, INGREDIENT_UNITS.get(ing, ""), 0))
+        """, (ing, 0.0, INGREDIENT_UNITS.get(ing, ""), 0.0))
 
     return list(ingredients)
 
 
-def sync_inventory_with_bom():
-    """
-    Add missing BOM ingredients to inventory without deleting existing data.
-    """
-    ensure_bom_seeded()
-    ensure_safety_stock_column()
-
-    ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
-    existing_df = fetch_df("SELECT ingredient FROM inventory")
-
-    existing_ingredients = set(existing_df["ingredient"].values) if not existing_df.empty else set()
-    missing_ingredients = ingredients - existing_ingredients
-
-    for ing in missing_ingredients:
-        query_db("""
-            INSERT INTO inventory (ingredient, quantity, unit, safety_stock)
-            VALUES (?, ?, ?, ?)
-        """, (ing, 0, INGREDIENT_UNITS.get(ing, ""), 0))
-
-    return list(ingredients)
-
-
-def load_inventory_df_ordered(ingredients):
-    """Load inventory as a DataFrame, ensuring BOM order."""
+def load_inventory_df_ordered(ingredients: list[str]):
+    """Load inventory as a DataFrame, ensuring every BOM ingredient appears (ordered by BOM)."""
     df = fetch_df("""
         SELECT ingredient AS Ingredient, 
                quantity AS Quantity, 
@@ -69,14 +74,24 @@ def load_inventory_df_ordered(ingredients):
                safety_stock AS [Safety Stock]
         FROM inventory
     """)
+
+    if df is None or df.empty:
+        df = pd.DataFrame(columns=["Ingredient", "Quantity", "Unit", "Safety Stock"])
+
+    # Ensure all BOM ingredients are present in the dataframe (default zeros)
     for ing in ingredients:
         if ing not in df["Ingredient"].values:
-            df.loc[len(df)] = [ing, 0, INGREDIENT_UNITS.get(ing, ""), 0]
-    return df.set_index("Ingredient").reindex(ingredients).reset_index()
+            df.loc[len(df)] = [ing, 0.0, INGREDIENT_UNITS.get(ing, ""), 0.0]
+
+    return (
+        df.set_index("Ingredient")
+          .reindex(ingredients)
+          .reset_index()
+    )
 
 
-def save_inventory_df(df):
-    """Save updated inventory to SQL Server."""
+def save_inventory_df(df: pd.DataFrame):
+    """Upsert each row via MERGE (SQL Server)."""
     for _, row in df.iterrows():
         query_db("""
             MERGE inventory AS target
@@ -92,22 +107,22 @@ def save_inventory_df(df):
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
         """, (
             row["Ingredient"],
-            float(row["Quantity"]),
-            row.get("Unit", ""),
-            float(row.get("Safety Stock", 0))
+            float(row["Quantity"]) if pd.notna(row["Quantity"]) else 0.0,
+            row.get("Unit", "") or "",
+            float(row.get("Safety Stock", 0.0)) if pd.notna(row.get("Safety Stock", 0.0)) else 0.0
         ))
 
 
 def inventory_page():
-    """Streamlit Inventory Management page."""
+    """Streamlit Inventory Management page (SQL Server–safe)."""
     init_db()
     st.header("📦 Inventory Management")
 
-    # Sync missing ingredients without clearing data
+    # Ensure all BOM ingredients exist (no deletes)
     ingredients = sync_inventory_with_bom()
     df = load_inventory_df_ordered(ingredients)
 
-    # Display-friendly ingredient names
+    # Display-friendly names with units
     display_names = [
         f"{ing} ({INGREDIENT_UNITS.get(ing, '')})" if INGREDIENT_UNITS.get(ing) else ing
         for ing in ingredients
@@ -115,26 +130,28 @@ def inventory_page():
     df_disp = df.copy()
     df_disp["Ingredient"] = display_names
 
-    # Session states
+    # Session state
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
     if "login_prompt" not in st.session_state:
         st.session_state.login_prompt = False
+    if "reset_mode" not in st.session_state:
+        st.session_state.reset_mode = False
 
-    # Reset inventory button (admin only)
+    # Admin reset button (explicit action)
     if st.button("♻ Reset Inventory from BOM (Admin)"):
         st.session_state.login_prompt = True
         st.session_state.reset_mode = True
         st.rerun()
 
-    # Enable editing button
+    # Enable editing
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         if st.button("🔓 Enable Editing"):
             st.session_state.login_prompt = True
             st.session_state.reset_mode = False
             st.rerun()
 
-    # Login form
+    # Admin login gate
     if st.session_state.login_prompt and not st.session_state.inventory_edit_enabled:
         with st.form("auth_form", clear_on_submit=True):
             uid = st.text_input("Enter User ID")
@@ -142,7 +159,7 @@ def inventory_page():
             ok = st.form_submit_button("Login")
         if ok:
             if uid == ADMIN_ID and pwd == ADMIN_PASS:
-                if getattr(st.session_state, "reset_mode", False):
+                if st.session_state.reset_mode:
                     reset_inventory_from_bom()
                     st.success("✅ Inventory fully reset from BOM.")
                 else:
@@ -158,6 +175,8 @@ def inventory_page():
     if st.session_state.inventory_edit_enabled:
         st.success("✅ Editing enabled. You can now update inventory.")
         edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True)
+
+        # Map back to raw ingredient keys for saving
         edited["Ingredient"] = ingredients
         edited["Unit"] = [INGREDIENT_UNITS.get(ing, "") for ing in ingredients]
 
@@ -167,6 +186,6 @@ def inventory_page():
             st.session_state.inventory_edit_enabled = False
             st.rerun()
 
-    # Read-only mode
+    # Read-only display
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True)
