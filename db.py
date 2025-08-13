@@ -2,11 +2,11 @@ import os
 import pandas as pd
 import pyodbc
 
-# Remote SQL Server connection details
+# Remote SQL Server connection details (you can store these in environment variables for security)
 SERVER = "den1.mssql7.gear.host"
 DATABASE = "billinghistory"
 USERNAME = "billinghistory"
-PASSWORD = "Pk0Z-57_avQe"  # Secure this in environment variables if possible
+PASSWORD = "Pk0Z-57_avQe"  # Change to os.environ.get("DB_PASSWORD") for security
 
 def connect():
     """Establish connection to remote SQL Server database."""
@@ -88,7 +88,7 @@ def query_db(query, params=(), fetch=False, many=False, seq=None, ignore_errors=
         rows = cur.fetchall() if fetch else None
         conn.commit()
         return rows
-    except Exception as e:
+    except Exception:
         if not ignore_errors:
             raise
         return None
@@ -114,3 +114,21 @@ def upsert_inventory_row(ingredient, unit):
         WHEN NOT MATCHED THEN
             INSERT (ingredient, quantity, unit) VALUES (source.ingredient, 0, source.unit);
     """, (ingredient, unit))
+
+def replace_inventory(df):
+    """Replace inventory table with new data from a DataFrame."""
+    conn = connect()
+    cur = conn.cursor()
+    try:
+        # Clear existing table
+        cur.execute("TRUNCATE TABLE inventory")
+
+        # Insert new rows
+        for _, row in df.iterrows():
+            cur.execute(
+                "INSERT INTO inventory (ingredient, quantity, unit) VALUES (?, ?, ?)",
+                (row["ingredient"], row["quantity"], row["unit"])
+            )
+        conn.commit()
+    finally:
+        conn.close()
