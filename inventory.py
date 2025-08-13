@@ -9,7 +9,7 @@ ADMIN_PASS = "456"
 
 
 def ensure_safety_stock_column():
-    """Add safety_stock column to inventory if not exists."""
+    """Add safety_stock column to inventory if it doesn't exist."""
     query_db("""
         IF COL_LENGTH('inventory', 'safety_stock') IS NULL
         BEGIN
@@ -26,27 +26,42 @@ def reset_inventory_from_bom():
     ensure_bom_seeded()
     ensure_safety_stock_column()
 
-    # Extract all unique ingredients from the BOM
     ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
-
-    # Delete existing data
     query_db("DELETE FROM inventory")
 
-    # Prepare fresh data
-    rows = [(ing, 0, INGREDIENT_UNITS.get(ing, ""), 0) for ing in ingredients]
-
-    # Insert all in one go (SQL Server style)
-    for row in rows:
+    for ing in ingredients:
         query_db("""
             INSERT INTO inventory (ingredient, quantity, unit, safety_stock)
             VALUES (?, ?, ?, ?)
-        """, row)
+        """, (ing, 0, INGREDIENT_UNITS.get(ing, ""), 0))
+
+    return list(ingredients)
+
+
+def sync_inventory_with_bom():
+    """
+    Add missing BOM ingredients to inventory without deleting existing data.
+    """
+    ensure_bom_seeded()
+    ensure_safety_stock_column()
+
+    ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
+    existing_df = fetch_df("SELECT ingredient FROM inventory")
+
+    existing_ingredients = set(existing_df["ingredient"].values) if not existing_df.empty else set()
+    missing_ingredients = ingredients - existing_ingredients
+
+    for ing in missing_ingredients:
+        query_db("""
+            INSERT INTO inventory (ingredient, quantity, unit, safety_stock)
+            VALUES (?, ?, ?, ?)
+        """, (ing, 0, INGREDIENT_UNITS.get(ing, ""), 0))
 
     return list(ingredients)
 
 
 def load_inventory_df_ordered(ingredients):
-    """Load inventory as a DataFrame, ensuring all BOM ingredients appear in correct order."""
+    """Load inventory as a DataFrame, ensuring BOM order."""
     df = fetch_df("""
         SELECT ingredient AS Ingredient, 
                quantity AS Quantity, 
@@ -54,7 +69,6 @@ def load_inventory_df_ordered(ingredients):
                safety_stock AS [Safety Stock]
         FROM inventory
     """)
-    # Add missing BOM ingredients
     for ing in ingredients:
         if ing not in df["Ingredient"].values:
             df.loc[len(df)] = [ing, 0, INGREDIENT_UNITS.get(ing, ""), 0]
@@ -62,10 +76,7 @@ def load_inventory_df_ordered(ingredients):
 
 
 def save_inventory_df(df):
-    """
-    Save updated inventory to SQL Server.
-    Uses MERGE to update existing records or insert if missing.
-    """
+    """Save updated inventory to SQL Server."""
     for _, row in df.iterrows():
         query_db("""
             MERGE inventory AS target
@@ -92,28 +103,35 @@ def inventory_page():
     init_db()
     st.header("📦 Inventory Management")
 
-    # Always reset inventory from BOM at page load
-    ingredients = reset_inventory_from_bom()
+    # Sync missing ingredients without clearing data
+    ingredients = sync_inventory_with_bom()
     df = load_inventory_df_ordered(ingredients)
 
-    # Display-friendly names with units
+    # Display-friendly ingredient names
     display_names = [
-        f"{ing} ({INGREDIENT_UNITS.get(ing, '')})" if INGREDIENT_UNITS.get(ing) else ing 
+        f"{ing} ({INGREDIENT_UNITS.get(ing, '')})" if INGREDIENT_UNITS.get(ing) else ing
         for ing in ingredients
     ]
     df_disp = df.copy()
     df_disp["Ingredient"] = display_names
 
-    # Session state controls
+    # Session states
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
     if "login_prompt" not in st.session_state:
         st.session_state.login_prompt = False
 
-    # Show edit button
+    # Reset inventory button (admin only)
+    if st.button("♻ Reset Inventory from BOM (Admin)"):
+        st.session_state.login_prompt = True
+        st.session_state.reset_mode = True
+        st.rerun()
+
+    # Enable editing button
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         if st.button("🔓 Enable Editing"):
             st.session_state.login_prompt = True
+            st.session_state.reset_mode = False
             st.rerun()
 
     # Login form
@@ -124,7 +142,11 @@ def inventory_page():
             ok = st.form_submit_button("Login")
         if ok:
             if uid == ADMIN_ID and pwd == ADMIN_PASS:
-                st.session_state.inventory_edit_enabled = True
+                if getattr(st.session_state, "reset_mode", False):
+                    reset_inventory_from_bom()
+                    st.success("✅ Inventory fully reset from BOM.")
+                else:
+                    st.session_state.inventory_edit_enabled = True
                 st.session_state.login_prompt = False
                 st.rerun()
             else:
@@ -136,8 +158,6 @@ def inventory_page():
     if st.session_state.inventory_edit_enabled:
         st.success("✅ Editing enabled. You can now update inventory.")
         edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True)
-
-        # Keep original ingredient keys for saving
         edited["Ingredient"] = ingredients
         edited["Unit"] = [INGREDIENT_UNITS.get(ing, "") for ing in ingredients]
 
@@ -145,9 +165,8 @@ def inventory_page():
             save_inventory_df(edited)
             st.success("Inventory saved successfully!")
             st.session_state.inventory_edit_enabled = False
-            st.session_state.login_prompt = False
             st.rerun()
 
-    # Read-only display
+    # Read-only mode
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True)
