@@ -9,27 +9,39 @@ ADMIN_ID = "123"
 ADMIN_PASS = "456"
 
 
+# --- DB helpers ---
 def ensure_safety_stock_column():
-    """Add safety_stock column to inventory if it doesn't exist (SQL Server)."""
+    """Ensure 'safety_stock' column exists in inventory table."""
     query_db("""
         IF COL_LENGTH('inventory', 'safety_stock') IS NULL
         BEGIN
-            ALTER TABLE inventory ADD safety_stock FLOAT NULL CONSTRAINT DF_inventory_safety_stock DEFAULT 0 WITH VALUES
+            ALTER TABLE inventory 
+            ADD safety_stock FLOAT NULL 
+            CONSTRAINT DF_inventory_safety_stock DEFAULT 0 WITH VALUES;
         END
     """, ignore_errors=True)
 
 
+def get_all_bom_ingredients():
+    """
+    Return BOM ingredients in a consistent list order.
+    Flatten DEFAULT_BOM while preserving the insertion order of products & ingredients.
+    """
+    ingredients = []
+    for recipe in DEFAULT_BOM.values():
+        for ing in recipe.keys():
+            if ing not in ingredients:  # Avoid duplicates while keeping order
+                ingredients.append(ing)
+    return ingredients
+
+
 def sync_inventory_with_bom():
-    """
-    Add any BOM ingredients that are missing from inventory (no deletes).
-    Returns the full list of BOM ingredients (for ordering/display).
-    """
+    """Ensure inventory contains all BOM ingredients (no deletions)."""
     ensure_bom_seeded()
     ensure_safety_stock_column()
 
-    ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
+    ingredients = get_all_bom_ingredients()
 
-    # Insert only the missing ones via MERGE
     for ing in ingredients:
         unit = INGREDIENT_UNITS.get(ing, "")
         query_db("""
@@ -41,19 +53,16 @@ def sync_inventory_with_bom():
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
         """, (ing, unit))
 
-    return list(ingredients)
+    return ingredients
 
 
 def reset_inventory_from_bom():
-    """
-    Completely replace inventory contents from BOM (admin action).
-    """
+    """Completely reset inventory table with BOM ingredients."""
     ensure_bom_seeded()
     ensure_safety_stock_column()
 
-    ingredients = {ing for ing_map in DEFAULT_BOM.values() for ing in ing_map.keys()}
+    ingredients = get_all_bom_ingredients()
 
-    # Safer than TRUNCATE (in case of FKs)
     query_db("DELETE FROM inventory")
 
     for ing in ingredients:
@@ -62,15 +71,15 @@ def reset_inventory_from_bom():
             VALUES (?, ?, ?, ?)
         """, (ing, 0.0, INGREDIENT_UNITS.get(ing, ""), 0.0))
 
-    return list(ingredients)
+    return ingredients
 
 
 def load_inventory_df_ordered(ingredients: list[str]):
-    """Load inventory as a DataFrame, ensuring every BOM ingredient appears (ordered by BOM)."""
+    """Load inventory DataFrame ensuring all BOM ingredients appear in the given order."""
     df = fetch_df("""
-        SELECT ingredient AS Ingredient, 
-               quantity AS Quantity, 
-               unit AS Unit, 
+        SELECT ingredient AS Ingredient,
+               quantity AS Quantity,
+               unit AS Unit,
                safety_stock AS [Safety Stock]
         FROM inventory
     """)
@@ -78,20 +87,16 @@ def load_inventory_df_ordered(ingredients: list[str]):
     if df is None or df.empty:
         df = pd.DataFrame(columns=["Ingredient", "Quantity", "Unit", "Safety Stock"])
 
-    # Ensure all BOM ingredients are present in the dataframe (default zeros)
+    # Ensure every BOM ingredient is present
     for ing in ingredients:
         if ing not in df["Ingredient"].values:
             df.loc[len(df)] = [ing, 0.0, INGREDIENT_UNITS.get(ing, ""), 0.0]
 
-    return (
-        df.set_index("Ingredient")
-          .reindex(ingredients)
-          .reset_index()
-    )
+    return df.set_index("Ingredient").reindex(ingredients).reset_index()
 
 
 def save_inventory_df(df: pd.DataFrame):
-    """Upsert each row via MERGE (SQL Server)."""
+    """Upsert all rows from the edited DataFrame."""
     for _, row in df.iterrows():
         query_db("""
             MERGE inventory AS target
@@ -113,24 +118,24 @@ def save_inventory_df(df: pd.DataFrame):
         ))
 
 
+# --- UI Page ---
 def inventory_page():
-    """Streamlit Inventory Management page (SQL Server–safe)."""
+    """Streamlit Inventory Management Page."""
     init_db()
     st.header("📦 Inventory Management")
 
-    # Ensure all BOM ingredients exist (no deletes)
+    # Sync with BOM
     ingredients = sync_inventory_with_bom()
     df = load_inventory_df_ordered(ingredients)
 
-    # Display-friendly names with units
-    display_names = [
-        f"{ing} ({INGREDIENT_UNITS.get(ing, '')})" if INGREDIENT_UNITS.get(ing) else ing
-        for ing in ingredients
-    ]
+    # Create display names with units
     df_disp = df.copy()
-    df_disp["Ingredient"] = display_names
+    df_disp["Ingredient"] = [
+        f"{ing} ({INGREDIENT_UNITS.get(ing, '')})" if INGREDIENT_UNITS.get(ing) else ing
+        for ing in df["Ingredient"]
+    ]
 
-    # Session state
+    # Session state setup
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
     if "login_prompt" not in st.session_state:
@@ -138,20 +143,20 @@ def inventory_page():
     if "reset_mode" not in st.session_state:
         st.session_state.reset_mode = False
 
-    # Admin reset button (explicit action)
+    # Admin Reset
     if st.button("♻ Reset Inventory from BOM (Admin)"):
         st.session_state.login_prompt = True
         st.session_state.reset_mode = True
         st.rerun()
 
-    # Enable editing
+    # Enable Editing
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         if st.button("🔓 Enable Editing"):
             st.session_state.login_prompt = True
             st.session_state.reset_mode = False
             st.rerun()
 
-    # Admin login gate
+    # Admin login
     if st.session_state.login_prompt and not st.session_state.inventory_edit_enabled:
         with st.form("auth_form", clear_on_submit=True):
             uid = st.text_input("Enter User ID")
@@ -168,15 +173,16 @@ def inventory_page():
                 st.rerun()
             else:
                 st.error("❌ Invalid ID or password.")
+
         st.dataframe(df_disp, use_container_width=True)
         return
 
     # Editing mode
     if st.session_state.inventory_edit_enabled:
-        st.success("✅ Editing enabled. You can now update inventory.")
+        st.success("✅ Editing enabled. Update inventory values below.")
         edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True)
 
-        # Map back to raw ingredient keys for saving
+        # Map display names back to raw ingredient names
         edited["Ingredient"] = ingredients
         edited["Unit"] = [INGREDIENT_UNITS.get(ing, "") for ing in ingredients]
 
@@ -186,6 +192,6 @@ def inventory_page():
             st.session_state.inventory_edit_enabled = False
             st.rerun()
 
-    # Read-only display
+    # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True)
