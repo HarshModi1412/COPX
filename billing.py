@@ -7,11 +7,19 @@ from bom_handler import calculate_deduction, ensure_bom_seeded, INGREDIENT_UNITS
 
 # 5 café products
 PRODUCTS = [
-    {"product_id": "C1001", "name": "Espresso",  "price": 2.50},
-    {"product_id": "C1002", "name": "Cappuccino","price": 3.00},
-    {"product_id": "C1003", "name": "Latte",     "price": 3.20},
-    {"product_id": "C1004", "name": "Americano", "price": 2.80},
-    {"product_id": "C1005", "name": "Mocha",     "price": 3.50},
+    {"product_id": "C1001", "name": "Amaretto",  "price": 2.50},
+    {"product_id": "C1002", "name": "Caffe Latte","price": 3.00},
+    {"product_id": "C1003", "name": "Caffe Mocha",     "price": 3.20},
+    {"product_id": "C1004", "name": "Chamomile", "price": 2.80},
+    {"product_id": "C1005", "name": "Columbian",     "price": 3.50},
+    {"product_id": "C1006", "name": "Darjeeling",  "price": 2.50},
+    {"product_id": "C1007", "name": "Decaf Espresso","price": 3.00},
+    {"product_id": "C1008", "name": "Decaf Irish Cream",     "price": 3.20},
+    {"product_id": "C1009", "name": "Earl Grey", "price": 2.80},
+    {"product_id": "C1010", "name": "Green Tea",     "price": 3.50},
+    {"product_id": "C1011", "name": "Lemon",     "price": 3.20},
+    {"product_id": "C1012", "name": "Mint", "price": 2.80},
+    {"product_id": "C1013", "name": "Regular Espresso",     "price": 3.50},
 ]
 PRODUCT_OPTIONS = [f"{p['product_id']} — {p['name']}" for p in PRODUCTS]
 PID_BY_LABEL   = {f"{p['product_id']} — {p['name']}": p['product_id'] for p in PRODUCTS}
@@ -148,3 +156,4 @@ def billing_page():
 
         st.success(f"Invoice {invoice_id} saved for Customer {cust_id}. Inventory updated.")
         st.session_state.cart = []
+
