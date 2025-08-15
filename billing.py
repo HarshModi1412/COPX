@@ -22,11 +22,11 @@ PRODUCTS = [
     {"product_id": "C1013", "name": "Regular Espresso", "price": 3.50},
 ]
 
-# Mappings for quick lookup
+# Quick lookup mappings
 PRODUCT_OPTIONS = [f"{p['product_id']} — {p['name']}" for p in PRODUCTS]
-PID_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['product_id'] for p in PRODUCTS}
-NAME_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['name'] for p in PRODUCTS}
-PRICE_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['price'] for p in PRODUCTS}
+PID_BY_LABEL = {opt: p['product_id'] for opt, p in zip(PRODUCT_OPTIONS, PRODUCTS)}
+NAME_BY_LABEL = {opt: p['name'] for opt, p in zip(PRODUCT_OPTIONS, PRODUCTS)}
+PRICE_BY_LABEL = {opt: p['price'] for opt, p in zip(PRODUCT_OPTIONS, PRODUCTS)}
 
 
 def get_or_create_customer(customer_number: str, customer_name: str | None):
@@ -35,7 +35,7 @@ def get_or_create_customer(customer_number: str, customer_name: str | None):
     if not customer_number:
         return None, None
 
-    # Check if customer exists
+    # Check if exists
     row = query_db(
         "SELECT customer_id, customer_name FROM customers WHERE customer_number=?",
         (customer_number,), fetch=True
@@ -43,11 +43,11 @@ def get_or_create_customer(customer_number: str, customer_name: str | None):
     if row:
         return row[0][0], row[0][1]
 
-    # Require name for new customer
+    # Require name for new
     if not customer_name or not customer_name.strip():
         return None, None
 
-    # Create new customer
+    # Create
     count = query_db("SELECT COUNT(*) FROM customers", fetch=True)[0][0]
     new_id = f"CUST-{count + 1:04d}"
     query_db(
@@ -79,13 +79,11 @@ def billing_page():
 
     st.header("🧾 Cafe Billing")
 
-    # Add items to cart
+    # Add item form
     with st.form("add_item_form", clear_on_submit=True):
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            label = st.selectbox("Product", PRODUCT_OPTIONS, index=0)
-        with c2:
-            qty = st.number_input("Quantity", min_value=1, value=1, step=1)
+        col1, col2 = st.columns([3, 1])
+        label = col1.selectbox("Product", PRODUCT_OPTIONS, index=0)
+        qty = col2.number_input("Quantity", min_value=1, value=1, step=1)
         if st.form_submit_button("Add to Cart"):
             st.session_state.cart.append({
                 "product_id": PID_BY_LABEL[label],
@@ -96,19 +94,29 @@ def billing_page():
             })
             st.success("Item added to cart.")
 
-    # If cart is empty, stop
+    # Stop if empty
     if not st.session_state.cart:
         return
 
-    # Show cart with remove buttons
+    # Cart display
     st.subheader("🛒 Current Cart")
+    st.markdown("""
+        <style>
+        button[title="Remove"] {
+            font-size: 0.8rem !important;
+            padding: 0.1rem 0.3rem !important;
+            color: red !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     for idx, item in enumerate(st.session_state.cart):
-        col1, col2, col3, col4, col5 = st.columns([3, 2, 2, 2, 1])
+        col1, col2, col3, col4, col5 = st.columns([3, 2, 2, 2, 0.5])
         col1.write(item["product_name"])
         col2.write(f"Qty: {item['quantity']}")
         col3.write(f"Unit: ${item['unit_price']:.2f}")
         col4.write(f"Total: ${item['total']:.2f}")
-        if col5.button("❌", key=f"remove_{idx}"):
+        if col5.button("❌", key=f"remove_{idx}", help="Remove", type="secondary"):
             st.session_state.cart.pop(idx)
             st.rerun()
 
@@ -143,7 +151,7 @@ def billing_page():
         invoice_id = str(uuid.uuid4())
         ts = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Insert billing records
+        # Save billing
         for item in st.session_state.cart:
             query_db("""
                 INSERT INTO billing
@@ -154,7 +162,7 @@ def billing_page():
                 int(item["quantity"]), float(item["unit_price"]), float(item["total"]), ts
             ))
 
-        # Deduct inventory based on BOM
+        # Deduct from inventory
         deduction = calculate_deduction(st.session_state.cart)
         if deduction:
             ensure_inventory_rows_exist(list(deduction.keys()))
