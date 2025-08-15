@@ -5,26 +5,28 @@ import uuid
 from db import init_db, query_db, fetch_df
 from bom_handler import calculate_deduction, ensure_bom_seeded, INGREDIENT_UNITS
 
-# 5 café products
+# Product list
 PRODUCTS = [
-    {"product_id": "C1001", "name": "Amaretto",  "price": 2.50},
-    {"product_id": "C1002", "name": "Caffe Latte","price": 3.00},
-    {"product_id": "C1003", "name": "Caffe Mocha",     "price": 3.20},
+    {"product_id": "C1001", "name": "Amaretto", "price": 2.50},
+    {"product_id": "C1002", "name": "Caffe Latte", "price": 3.00},
+    {"product_id": "C1003", "name": "Caffe Mocha", "price": 3.20},
     {"product_id": "C1004", "name": "Chamomile", "price": 2.80},
-    {"product_id": "C1005", "name": "Columbian",     "price": 3.50},
-    {"product_id": "C1006", "name": "Darjeeling",  "price": 2.50},
-    {"product_id": "C1007", "name": "Decaf Espresso","price": 3.00},
-    {"product_id": "C1008", "name": "Decaf Irish Cream",     "price": 3.20},
+    {"product_id": "C1005", "name": "Columbian", "price": 3.50},
+    {"product_id": "C1006", "name": "Darjeeling", "price": 2.50},
+    {"product_id": "C1007", "name": "Decaf Espresso", "price": 3.00},
+    {"product_id": "C1008", "name": "Decaf Irish Cream", "price": 3.20},
     {"product_id": "C1009", "name": "Earl Grey", "price": 2.80},
-    {"product_id": "C1010", "name": "Green Tea",     "price": 3.50},
-    {"product_id": "C1011", "name": "Lemon",     "price": 3.20},
+    {"product_id": "C1010", "name": "Green Tea", "price": 3.50},
+    {"product_id": "C1011", "name": "Lemon", "price": 3.20},
     {"product_id": "C1012", "name": "Mint", "price": 2.80},
-    {"product_id": "C1013", "name": "Regular Espresso",     "price": 3.50},
+    {"product_id": "C1013", "name": "Regular Espresso", "price": 3.50},
 ]
+
+# Mappings for quick lookup
 PRODUCT_OPTIONS = [f"{p['product_id']} — {p['name']}" for p in PRODUCTS]
-PID_BY_LABEL   = {f"{p['product_id']} — {p['name']}": p['product_id'] for p in PRODUCTS}
-NAME_BY_LABEL  = {f"{p['product_id']} — {p['name']}": p['name']      for p in PRODUCTS}
-PRICE_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['price']     for p in PRODUCTS}
+PID_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['product_id'] for p in PRODUCTS}
+NAME_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['name'] for p in PRODUCTS}
+PRICE_BY_LABEL = {f"{p['product_id']} — {p['name']}": p['price'] for p in PRODUCTS}
 
 
 def get_or_create_customer(customer_number: str, customer_name: str | None):
@@ -33,7 +35,7 @@ def get_or_create_customer(customer_number: str, customer_name: str | None):
     if not customer_number:
         return None, None
 
-    # Existing?
+    # Check if customer exists
     row = query_db(
         "SELECT customer_id, customer_name FROM customers WHERE customer_number=?",
         (customer_number,), fetch=True
@@ -41,11 +43,11 @@ def get_or_create_customer(customer_number: str, customer_name: str | None):
     if row:
         return row[0][0], row[0][1]
 
-    # Need a name to create
+    # Require name for new customer
     if not customer_name or not customer_name.strip():
         return None, None
 
-    # Create new with sequential ID
+    # Create new customer
     count = query_db("SELECT COUNT(*) FROM customers", fetch=True)[0][0]
     new_id = f"CUST-{count + 1:04d}"
     query_db(
@@ -56,10 +58,9 @@ def get_or_create_customer(customer_number: str, customer_name: str | None):
 
 
 def ensure_inventory_rows_exist(ingredients: list[str]):
-    """Ensure each ingredient exists in inventory; if missing, insert with quantity=0 and correct unit."""
+    """Ensure each ingredient exists in inventory; insert with 0 quantity if missing."""
     for ing in ingredients:
         unit = INGREDIENT_UNITS.get(ing, "")
-        # SQL Server: upsert with MERGE to avoid PK violation
         query_db("""
             MERGE inventory AS target
             USING (SELECT ? AS ingredient, CAST(0 AS FLOAT) AS quantity, ? AS unit) AS source
@@ -78,7 +79,7 @@ def billing_page():
 
     st.header("🧾 Cafe Billing")
 
-    # Add-to-cart UI
+    # Add items to cart
     with st.form("add_item_form", clear_on_submit=True):
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -95,13 +96,23 @@ def billing_page():
             })
             st.success("Item added to cart.")
 
+    # If cart is empty, stop
     if not st.session_state.cart:
         return
 
+    # Show cart with remove buttons
     st.subheader("🛒 Current Cart")
-    st.dataframe(pd.DataFrame(st.session_state.cart), use_container_width=True)
+    for idx, item in enumerate(st.session_state.cart):
+        col1, col2, col3, col4, col5 = st.columns([3, 2, 2, 2, 1])
+        col1.write(item["product_name"])
+        col2.write(f"Qty: {item['quantity']}")
+        col3.write(f"Unit: ${item['unit_price']:.2f}")
+        col4.write(f"Total: ${item['total']:.2f}")
+        if col5.button("❌", key=f"remove_{idx}"):
+            st.session_state.cart.pop(idx)
+            st.rerun()
 
-    # Customer
+    # Customer details
     st.subheader("👤 Customer Details")
     customer_number = st.text_input("Customer Number").strip()
     auto_name = None
@@ -132,7 +143,7 @@ def billing_page():
         invoice_id = str(uuid.uuid4())
         ts = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Insert invoice line items (timestamp is a reserved word, bracket it)
+        # Insert billing records
         for item in st.session_state.cart:
             query_db("""
                 INSERT INTO billing
@@ -143,12 +154,11 @@ def billing_page():
                 int(item["quantity"]), float(item["unit_price"]), float(item["total"]), ts
             ))
 
-        # Deduct inventory using BOM — do it with UPDATE so we don't read/write whole frames
+        # Deduct inventory based on BOM
         deduction = calculate_deduction(st.session_state.cart)
         if deduction:
             ensure_inventory_rows_exist(list(deduction.keys()))
             for ing, dec_qty in deduction.items():
-                # Safe arithmetic update; ensure row exists first (done above)
                 query_db(
                     "UPDATE inventory SET quantity = ISNULL(quantity, 0) - ? WHERE ingredient = ?",
                     (float(dec_qty), ing)
@@ -156,4 +166,3 @@ def billing_page():
 
         st.success(f"Invoice {invoice_id} saved for Customer {cust_id}. Inventory updated.")
         st.session_state.cart = []
-
