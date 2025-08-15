@@ -27,6 +27,7 @@ def get_all_bom_ingredients():
     return ingredients
 
 def sync_inventory_with_bom():
+    """Insert BOM ingredients if missing, keep existing ones."""
     ensure_bom_seeded()
     ensure_safety_stock_column()
     ingredients = get_all_bom_ingredients()
@@ -40,7 +41,6 @@ def sync_inventory_with_bom():
                 INSERT (ingredient, quantity, unit, safety_stock)
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
         """, (ing, unit))
-    return ingredients
 
 def load_full_inventory_df():
     """Load the full inventory without dropping any rows."""
@@ -56,6 +56,7 @@ def load_full_inventory_df():
     return df
 
 def save_inventory_df(df: pd.DataFrame):
+    """Upsert inventory changes."""
     for _, row in df.iterrows():
         query_db("""
             MERGE inventory AS target
@@ -81,7 +82,7 @@ def inventory_page():
     init_db()
     st.header("📦 Inventory Management")
 
-    # Ensure BOM items exist in table but keep all items
+    # Ensure BOM ingredients exist in table but keep all items
     sync_inventory_with_bom()
 
     # Load full table
@@ -99,20 +100,11 @@ def inventory_page():
         st.session_state.inventory_edit_enabled = False
     if "login_prompt" not in st.session_state:
         st.session_state.login_prompt = False
-    if "reset_mode" not in st.session_state:
-        st.session_state.reset_mode = False
-
-    # Reset button
-    if st.button("♻ Reset Inventory from BOM (Admin)"):
-        st.session_state.login_prompt = True
-        st.session_state.reset_mode = True
-        st.rerun()
 
     # Enable editing button
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         if st.button("🔓 Enable Editing"):
             st.session_state.login_prompt = True
-            st.session_state.reset_mode = False
             st.rerun()
 
     # Admin login
@@ -123,12 +115,7 @@ def inventory_page():
             ok = st.form_submit_button("Login")
         if ok:
             if uid == ADMIN_ID and pwd == ADMIN_PASS:
-                if st.session_state.reset_mode:
-                    query_db("DELETE FROM inventory")
-                    sync_inventory_with_bom()
-                    st.success("✅ Inventory fully reset from BOM.")
-                else:
-                    st.session_state.inventory_edit_enabled = True
+                st.session_state.inventory_edit_enabled = True
                 st.session_state.login_prompt = False
                 st.rerun()
             else:
