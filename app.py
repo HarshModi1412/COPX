@@ -12,7 +12,7 @@ init_db()
 
 menu = st.sidebar.radio(
     "Navigation",
-    ["order_management", "Billing", "Inventory Management", "Billing History", "Business Analyst"]  # <-- add Orders
+    [ "Billing", "order_management", "Inventory Management", "Billing History", "Business Analyst"]  # <-- add Orders
 )
 
 if menu == "order_management":
@@ -25,4 +25,5 @@ elif menu == "Billing History":
     billing_history_page()
 elif menu == "Business Analyst":
     analyst_page()
+
 
