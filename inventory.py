@@ -95,6 +95,16 @@ def inventory_page():
         for ing, unit in zip(df["Ingredient"], df["Unit"])
     ]
 
+    # Make table bigger with CSS
+    st.markdown("""
+        <style>
+        .stDataFrame, .stDataEditor {
+            height: auto !important;
+            max-height: none !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     # State setup
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
@@ -121,13 +131,13 @@ def inventory_page():
             else:
                 st.error("❌ Invalid ID or password.")
 
-        st.dataframe(df_disp, use_container_width=True)
+        st.dataframe(df_disp, use_container_width=True, height=800)
         return
 
     # Editing mode
     if st.session_state.inventory_edit_enabled:
         st.success("✅ Editing enabled. Update inventory values below.")
-        edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True)
+        edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True, height=800)
 
         # Map display names back to raw names
         edited["Ingredient"] = df["Ingredient"]
@@ -140,4 +150,4 @@ def inventory_page():
 
     # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
-        st.dataframe(df_disp, use_container_width=True)
+        st.dataframe(df_disp, use_container_width=True, height=800)
