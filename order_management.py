@@ -5,37 +5,51 @@ from db import fetch_df, query_db
 def order_management_page():
     st.title("📦 Order Management")
 
-    # Fetch ongoing orders
+    # Fetch and group orders
     orders_df = fetch_df("""
-        SELECT billing_id, customer_name, total_amount, status, invoice_date
+        SELECT 
+            invoice_id,
+            customer_id,
+            SUM(total) AS total_amount,
+            MIN(timestamp) AS order_time,
+            status
         FROM billing
-        WHERE status = 'ongoing'
-        ORDER BY invoice_date ASC
+        GROUP BY invoice_id, customer_id, status
+        HAVING status = 'ongoing'
+        ORDER BY order_time ASC
     """)
 
     if orders_df.empty:
         st.info("No ongoing orders at the moment.")
         return
 
-    # Show as interactive list
+    # Display orders
     for _, row in orders_df.iterrows():
-        col1, col2, col3, col4, col5 = st.columns([3, 3, 2, 2, 2])
-        col1.write(f"**Order ID:** {row['billing_id']}")
-        col2.write(f"**Customer:** {row['customer_name']}")
-        col3.write(f"💰 {row['total_amount']}")
-        col4.write(f"📅 {row['invoice_date']}")
+        with st.expander(f"🧾 Order {row['invoice_id']} - Customer {row['customer_id']}"):
+            st.write(f"**Total Amount:** ₹{row['total_amount']}")
+            st.write(f"**Order Time:** {row['order_time']}")
 
-        with col5:
-            if st.button("✅ Done", key=f"done_{row['billing_id']}"):
-                query_db("UPDATE billing SET status = 'done' WHERE billing_id = ?", (row['billing_id'],))
-                st.success(f"Order {row['billing_id']} marked as done.")
-                st.rerun()
+            # Show order items
+            items_df = fetch_df("""
+                SELECT product_name, quantity, unit_price, total
+                FROM billing
+                WHERE invoice_id = ?
+            """, (row['invoice_id'],))
+            st.table(items_df)
 
-            if st.button("❌ Cancel", key=f"cancel_{row['billing_id']}"):
-                query_db("UPDATE billing SET status = 'canceled' WHERE billing_id = ?", (row['billing_id'],))
-                st.warning(f"Order {row['billing_id']} canceled.")
-                st.rerun()
+            col1, col2 = st.columns(2)
 
-# Run the page
+            with col1:
+                if st.button("✅ Mark as Done", key=f"done_{row['invoice_id']}"):
+                    query_db("UPDATE billing SET status = 'done' WHERE invoice_id = ?", (row['invoice_id'],))
+                    st.success(f"Order {row['invoice_id']} marked as done.")
+                    st.rerun()
+
+            with col2:
+                if st.button("❌ Cancel Order", key=f"cancel_{row['invoice_id']}"):
+                    query_db("UPDATE billing SET status = 'canceled' WHERE invoice_id = ?", (row['invoice_id'],))
+                    st.warning(f"Order {row['invoice_id']} canceled.")
+                    st.rerun()
+
 if __name__ == "__main__":
     order_management_page()
