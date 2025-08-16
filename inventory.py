@@ -59,19 +59,16 @@ def load_full_inventory_df():
 
 # --- Logging helpers ---
 def _get_self_life_days(ingredient: str) -> int | None:
-    """Fetch self_life_days from SQL Server table `self_life` for the given ingredient."""
+    """Fetch shelf life (in days) from SQL Server table `self_life` for the given ingredient."""
     try:
-        df = fetch_df("SELECT self_life_days FROM self_life WHERE ingredient = ?", (ingredient,))
+        df = fetch_df("SELECT self_life_days FROM self_life WHERE ingredient = ?", (ingredient.strip(),))
         if df is not None and not df.empty:
             val = df.iloc[0]["self_life_days"]
             if pd.notna(val):
                 return int(val)
-    except Exception:
-        # Swallow and treat as missing
-        pass
+    except Exception as e:
+        print(f"[WARN] Shelf life lookup failed for {ingredient}: {e}")
     return None
-
-from datetime import datetime, timedelta
 
 def log_inventory_change(ingredient, old_qty, new_qty):
     """Insert inventory change into logs, including use_before date."""
@@ -90,9 +87,12 @@ def log_inventory_change(ingredient, old_qty, new_qty):
 
         # ✅ Fetch shelf life days from self_life table
         shelf_life = _get_self_life_days(str(ingredient))
-        use_before = None
-        if shelf_life and shelf_life > 0:
-            use_before = (datetime.now() + timedelta(days=shelf_life)).date()
+
+        # ✅ Default fallback if not found
+        if not shelf_life or shelf_life <= 0:
+            shelf_life = 7  # default 7 days fallback
+
+        use_before = (datetime.now() + timedelta(days=shelf_life)).date()
 
         # ✅ Prepare parameters
         params = (
@@ -116,7 +116,7 @@ def log_inventory_change(ingredient, old_qty, new_qty):
 def save_inventory_df(df: pd.DataFrame):
     """Upsert inventory changes and log them."""
     for _, row in df.iterrows():
-        ing = row["Ingredient"]
+        ing = row["Ingredient"].strip()
         new_qty = float(row["Quantity"]) if pd.notna(row["Quantity"]) else 0.0
         unit = row.get("Unit", "") or ""
         safety_stock = float(row.get("Safety Stock", 0.0)) if pd.notna(row.get("Safety Stock", 0.0)) else 0.0
@@ -140,8 +140,9 @@ def save_inventory_df(df: pd.DataFrame):
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
         """, (str(ing), float(new_qty), str(unit), float(safety_stock)))
 
-        # Log change if quantity differs (skips first-time inserts where old_qty is None)
-        log_inventory_change(ing, old_qty, new_qty)
+        # Log change if quantity differs
+        if old_qty is not None:
+            log_inventory_change(ing, old_qty, new_qty)
 
 # --- UI Page ---
 def inventory_page():
@@ -219,5 +220,3 @@ def inventory_page():
     # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
-
-
