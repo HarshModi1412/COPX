@@ -55,9 +55,32 @@ def load_full_inventory_df():
         df = pd.DataFrame(columns=["Ingredient", "Quantity", "Unit", "Safety Stock"])
     return df
 
+def log_inventory_change(ingredient, old_qty, new_qty):
+    """Insert inventory change into logs."""
+    if old_qty is None:
+        return
+    diff = new_qty - old_qty
+    if diff == 0:
+        return
+    change_type = "Added" if diff > 0 else "Wasted"
+    query_db("""
+        INSERT INTO inventory_logs (ingredient, change_type, quantity_changed, old_quantity, new_quantity)
+        VALUES (?, ?, ?, ?, ?)
+    """, (ingredient, change_type, abs(diff), old_qty, new_qty))
+
 def save_inventory_df(df: pd.DataFrame):
-    """Upsert inventory changes."""
+    """Upsert inventory changes and log them."""
     for _, row in df.iterrows():
+        ing = row["Ingredient"]
+        new_qty = float(row["Quantity"]) if pd.notna(row["Quantity"]) else 0.0
+        unit = row.get("Unit", "") or ""
+        safety_stock = float(row.get("Safety Stock", 0.0)) if pd.notna(row.get("Safety Stock", 0.0)) else 0.0
+
+        # Get old quantity
+        old_qty_row = fetch_df("SELECT quantity FROM inventory WHERE ingredient = ?", (ing,))
+        old_qty = old_qty_row.iloc[0]["quantity"] if old_qty_row is not None and not old_qty_row.empty else None
+
+        # Update inventory
         query_db("""
             MERGE inventory AS target
             USING (SELECT ? AS ingredient, ? AS quantity, ? AS unit, ? AS safety_stock) AS source
@@ -70,32 +93,25 @@ def save_inventory_df(df: pd.DataFrame):
             WHEN NOT MATCHED THEN
                 INSERT (ingredient, quantity, unit, safety_stock)
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
-        """, (
-            row["Ingredient"],
-            float(row["Quantity"]) if pd.notna(row["Quantity"]) else 0.0,
-            row.get("Unit", "") or "",
-            float(row.get("Safety Stock", 0.0)) if pd.notna(row.get("Safety Stock", 0.0)) else 0.0
-        ))
+        """, (ing, new_qty, unit, safety_stock))
+
+        # Log change if quantity differs
+        log_inventory_change(ing, old_qty, new_qty)
 
 # --- UI Page ---
 def inventory_page():
     init_db()
     st.header("📦 Inventory Management")
 
-    # Ensure BOM ingredients exist in table but keep all items
     sync_inventory_with_bom()
-
-    # Load full table
     df = load_full_inventory_df()
 
-    # Add display names with units
     df_disp = df.copy()
     df_disp["Ingredient"] = [
         f"{ing} ({unit})" if unit else ing
         for ing, unit in zip(df["Ingredient"], df["Unit"])
     ]
 
-    # Make table bigger with CSS
     st.markdown("""
         <style>
         .stDataFrame, .stDataEditor {
@@ -105,19 +121,16 @@ def inventory_page():
         </style>
     """, unsafe_allow_html=True)
 
-    # State setup
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
     if "login_prompt" not in st.session_state:
         st.session_state.login_prompt = False
 
-    # Enable editing button
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         if st.button("🔓 Enable Editing"):
             st.session_state.login_prompt = True
             st.rerun()
 
-    # Admin login
     if st.session_state.login_prompt and not st.session_state.inventory_edit_enabled:
         with st.form("auth_form", clear_on_submit=True):
             uid = st.text_input("Enter User ID")
@@ -134,20 +147,16 @@ def inventory_page():
         st.dataframe(df_disp, use_container_width=True, height=800)
         return
 
-    # Editing mode
     if st.session_state.inventory_edit_enabled:
         st.success("✅ Editing enabled. Update inventory values below.")
         edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True, height=800)
-
-        # Map display names back to raw names
         edited["Ingredient"] = df["Ingredient"]
 
         if st.button("💾 Save Inventory"):
             save_inventory_df(edited)
-            st.success("Inventory saved successfully!")
+            st.success("Inventory saved successfully! Changes logged in history.")
             st.session_state.inventory_edit_enabled = False
             st.rerun()
 
-    # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
