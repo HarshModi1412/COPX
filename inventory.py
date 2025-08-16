@@ -57,11 +57,26 @@ def load_full_inventory_df():
         df = pd.DataFrame(columns=["Ingredient", "Quantity", "Unit", "Safety Stock"])
     return df
 
-# --- Logging helpers ---
+# Map inventory ingredient names to self_life names
+NAME_ALIASES = {
+    "Toppings": "Garnish / Toppings",
+    "Whipped Cream": "Whipped Cream",
+    "Espresso Beans": "Espresso Beans",
+    "Chocolate Syrup": "Chocolate Syrup",
+    "Flavored Syrup": "Flavored Syrup",
+    "Milk": "Milk",
+    "Sugar": "Sugar",
+    "Tea Leaves": "Tea Leaves",
+    "Hot Water": "Hot Water",
+    "Cup Size (total cups)": "Cup Size (total cups)"
+}
+
 def _get_self_life_days(ingredient: str) -> int | None:
     """Fetch shelf life (in days) from SQL Server table `self_life` for the given ingredient."""
     try:
-        df = fetch_df("SELECT self_life_days FROM self_life WHERE ingredient = ?", (ingredient.strip(),))
+        ing = ingredient.strip()
+        mapped = NAME_ALIASES.get(ing, ing)   # normalize name
+        df = fetch_df("SELECT self_life_days FROM self_life WHERE ingredient = ?", (mapped,))
         if df is not None and not df.empty:
             val = df.iloc[0]["self_life_days"]
             if pd.notna(val):
@@ -69,6 +84,7 @@ def _get_self_life_days(ingredient: str) -> int | None:
     except Exception as e:
         print(f"[WARN] Shelf life lookup failed for {ingredient}: {e}")
     return None
+
 
 def log_inventory_change(ingredient, old_qty, new_qty):
     """Insert inventory change into logs, including use_before date."""
@@ -223,4 +239,5 @@ def inventory_page():
     # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
+
 
