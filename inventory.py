@@ -71,48 +71,47 @@ def _get_self_life_days(ingredient: str) -> int | None:
         pass
     return None
 
+from datetime import datetime, timedelta
+
 def log_inventory_change(ingredient, old_qty, new_qty):
-    """
-    Insert inventory change into logs, including use_before date.
-    Shelf life is fetched from SQL Server table `self_life` (column: self_life_days).
-    """
-    # If the item didn't exist before (None), we skip logging the first insert.
-    if old_qty is None:
-        return
-
+    """Insert inventory change into logs, including use_before date."""
     try:
-        old_q = float(old_qty)
-        new_q = float(new_qty) if pd.notna(new_qty) else 0.0
-    except (TypeError, ValueError):
-        return
+        if old_qty is None or new_qty is None:
+            return
 
-    diff = new_q - old_q
-    if diff == 0:
-        return
+        old_qty = float(old_qty)
+        new_qty = float(new_qty)
+        diff = new_qty - old_qty
 
-    change_type = "Added" if diff > 0 else "Wasted"
+        if diff == 0:
+            return  # no change, skip
 
-    # Get shelf life days from DB and compute use_before
-    days = _get_self_life_days(str(ingredient))
-    use_before = None
-    if days is not None and days > 0:
-        ub_date = (datetime.now() + timedelta(days=int(days))).date()
-        # Pass a plain string (YYYY-MM-DD) to avoid driver dtype issues
-        use_before = ub_date.isoformat()
+        change_type = "Added" if diff > 0 else "Wasted"
 
-    # Insert log entry
-    query_db("""
-        INSERT INTO inventory_logs 
-            (ingredient, change_type, quantity_changed, old_quantity, new_quantity, use_before)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        str(ingredient),
-        str(change_type),
-        float(abs(diff)),
-        float(old_q),
-        float(new_q),
-        use_before
-    ))
+        # ✅ Calculate use_before date
+        shelf_life = SHELF_LIFE_DAYS.get(str(ingredient), None)
+        use_before = None
+        if shelf_life and shelf_life > 0:
+            use_before = (datetime.now() + timedelta(days=shelf_life)).strftime("%Y-%m-%d")  
+
+        # ✅ Ensure params match columns
+        params = (
+            str(ingredient),
+            change_type,
+            abs(diff),
+            old_qty,
+            new_qty,
+            use_before
+        )
+
+        query_db("""
+            INSERT INTO inventory_logs 
+                (ingredient, change_type, quantity_changed, old_quantity, new_quantity, use_before)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, params)
+
+    except Exception as e:
+        print(f"[ERROR] log_inventory_change failed: {e}")
 
 def save_inventory_df(df: pd.DataFrame):
     """Upsert inventory changes and log them."""
@@ -220,3 +219,4 @@ def inventory_page():
     # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
+
