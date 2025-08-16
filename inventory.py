@@ -59,14 +59,21 @@ def log_inventory_change(ingredient, old_qty, new_qty):
     """Insert inventory change into logs."""
     if old_qty is None:
         return
-    diff = new_qty - old_qty
+    diff = float(new_qty) - float(old_qty)
     if diff == 0:
         return
     change_type = "Added" if diff > 0 else "Wasted"
     query_db("""
         INSERT INTO inventory_logs (ingredient, change_type, quantity_changed, old_quantity, new_quantity)
         VALUES (?, ?, ?, ?, ?)
-    """, (ingredient, change_type, abs(diff), old_qty, new_qty))
+    """, (
+        str(ingredient),
+        str(change_type),
+        float(abs(diff)),
+        float(old_qty),
+        float(new_qty)
+    ))
+
 
 def save_inventory_df(df: pd.DataFrame):
     """Upsert inventory changes and log them."""
@@ -160,3 +167,4 @@ def inventory_page():
 
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
+
