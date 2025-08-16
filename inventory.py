@@ -90,9 +90,11 @@ def log_inventory_change(ingredient, old_qty, new_qty):
 
         # ✅ Default fallback if not found
         if not shelf_life or shelf_life <= 0:
-            shelf_life = 7  # default 7 days fallback
+            shelf_life = 7  # fallback
 
-        use_before = (datetime.now() + timedelta(days=shelf_life)).date()
+        # ✅ Use the current timestamp of change as base
+        ts_now = datetime.now()
+        use_before = (ts_now + timedelta(days=shelf_life)).date()
 
         # ✅ Prepare parameters
         params = (
@@ -101,13 +103,14 @@ def log_inventory_change(ingredient, old_qty, new_qty):
             float(abs(diff)),
             old_qty,
             new_qty,
-            use_before
+            ts_now,       # log timestamp
+            use_before    # calculated based on shelf life
         )
 
         query_db("""
             INSERT INTO inventory_logs 
-                (ingredient, change_type, quantity_changed, old_quantity, new_quantity, use_before)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (ingredient, change_type, quantity_changed, old_quantity, new_quantity, timestamp, use_before)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, params)
 
     except Exception as e:
@@ -220,3 +223,4 @@ def inventory_page():
     # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
+
