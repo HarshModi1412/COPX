@@ -57,10 +57,9 @@ def load_full_inventory_df():
         df = pd.DataFrame(columns=["Ingredient", "Quantity", "Unit", "Safety Stock"])
     return df
 
-# --- Shelf life mapping ---
+# --- Name normalization for shelf-life lookup ---
 NAME_ALIASES = {
-    "Toppings": "Garnish / Toppings",  # normalize
-    "Garnish / Toppings": "Garnish / Toppings",
+    "Toppings": "Garnish / Toppings",
     "Whipped Cream": "Whipped Cream",
     "Espresso Beans": "Espresso Beans",
     "Chocolate Syrup": "Chocolate Syrup",
@@ -69,25 +68,57 @@ NAME_ALIASES = {
     "Sugar": "Sugar",
     "Tea Leaves": "Tea Leaves",
     "Hot Water": "Hot Water",
-    "Cup Size (total cups)": "Cup Size (total cups)"
+    "Cup Size (total cups)": "Cup Size (total cups)",
 }
 
-def _get_self_life_days(ingredient: str) -> int | None:
-    """Fetch shelf life (in days) from SQL Server table `self_life` for the given ingredient."""
+def _get_shelf_life_days(ingredient: str) -> int | None:
+    """
+    Fetch shelf_life_days from SQL Server.
+    - Prefer table:  shelf_life (ingredient, shelf_life_days)
+    - Fallback:      self_life  (ingredient, self_life_days)
+    Matching is trimmed and case-insensitive.
+    """
+    ing = NAME_ALIASES.get(ingredient.strip(), ingredient.strip())
+
+    # Try the correct table/column first.
     try:
-        ing = ingredient.strip()
-        mapped = NAME_ALIASES.get(ing, ing)   # normalize name
-        df = fetch_df("SELECT self_life_days FROM self_life WHERE ingredient = ?", (mapped,))
+        df = fetch_df(
+            """
+            SELECT TOP 1 shelf_life_days
+            FROM shelf_life
+            WHERE UPPER(LTRIM(RTRIM(ingredient))) = UPPER(LTRIM(RTRIM(?)))
+            """,
+            (ing,),
+        )
         if df is not None and not df.empty:
-            val = df.iloc[0]["self_life_days"]
+            val = df.iloc[0]["shelf_life_days"]
             if pd.notna(val):
                 return int(val)
-    except Exception as e:
-        print(f"[WARN] Shelf life lookup failed for {ingredient}: {e}")
+    except Exception:
+        # If shelf_life table isn't present in some envs, try the legacy name.
+        pass
+
+    # Legacy table/column name (only if present)
+    try:
+        df2 = fetch_df(
+            """
+            SELECT TOP 1 self_life_days
+            FROM self_life
+            WHERE UPPER(LTRIM(RTRIM(ingredient))) = UPPER(LTRIM(RTRIM(?)))
+            """,
+            (ing,),
+        )
+        if df2 is not None and not df2.empty:
+            val2 = df2.iloc[0]["self_life_days"]
+            if pd.notna(val2):
+                return int(val2)
+    except Exception:
+        pass
+
     return None
 
 def log_inventory_change(ingredient, old_qty, new_qty):
-    """Insert inventory change into logs, including use_before date if applicable."""
+    """Insert inventory change into logs, including use_before date derived from shelf_life."""
     try:
         if old_qty is None or new_qty is None:
             return
@@ -95,36 +126,32 @@ def log_inventory_change(ingredient, old_qty, new_qty):
         old_qty = float(old_qty)
         new_qty = float(new_qty)
         diff = new_qty - old_qty
-
         if diff == 0:
-            return  # no change, skip
+            return
 
         change_type = "Added" if diff > 0 else "Wasted"
 
-        # ✅ Fetch shelf life days from self_life table
-        shelf_life = _get_self_life_days(str(ingredient))
-
+        # Look up shelf life strictly from DB (no arbitrary fallback).
+        days = _get_shelf_life_days(str(ingredient))
         ts_now = datetime.now()
-        use_before = None
-        if shelf_life and shelf_life > 0:
-            use_before = (ts_now + timedelta(days=shelf_life)).date()
+        use_before = (ts_now + timedelta(days=days)).date() if days and days > 0 else None
 
-        params = (
-            str(ingredient),
-            change_type,
-            float(abs(diff)),
-            old_qty,
-            new_qty,
-            ts_now,
-            use_before
-        )
-
-        query_db("""
-            INSERT INTO inventory_logs 
+        query_db(
+            """
+            INSERT INTO inventory_logs
                 (ingredient, change_type, quantity_changed, old_quantity, new_quantity, timestamp, use_before)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, params)
-
+            """,
+            (
+                str(ingredient),
+                change_type,
+                float(abs(diff)),
+                old_qty,
+                new_qty,
+                ts_now,
+                use_before,
+            ),
+        )
     except Exception as e:
         print(f"[ERROR] log_inventory_change failed: {e}")
 
@@ -136,12 +163,13 @@ def save_inventory_df(df: pd.DataFrame):
         unit = row.get("Unit", "") or ""
         safety_stock = float(row.get("Safety Stock", 0.0)) if pd.notna(row.get("Safety Stock", 0.0)) else 0.0
 
-        # Get old quantity
+        # Get old quantity (None if not found)
         old_qty_row = fetch_df("SELECT quantity FROM inventory WHERE ingredient = ?", (ing,))
         old_qty = old_qty_row.iloc[0]["quantity"] if old_qty_row is not None and not old_qty_row.empty else None
 
-        # Update / insert inventory
-        query_db("""
+        # Upsert inventory
+        query_db(
+            """
             MERGE inventory AS target
             USING (SELECT ? AS ingredient, ? AS quantity, ? AS unit, ? AS safety_stock) AS source
             ON target.ingredient = source.ingredient
@@ -153,8 +181,11 @@ def save_inventory_df(df: pd.DataFrame):
             WHEN NOT MATCHED THEN
                 INSERT (ingredient, quantity, unit, safety_stock)
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
-        """, (str(ing), float(new_qty), str(unit), float(safety_stock)))
+            """,
+            (str(ing), float(new_qty), str(unit), float(safety_stock)),
+        )
 
+        # Log change if there was an existing record
         if old_qty is not None:
             log_inventory_change(ing, old_qty, new_qty)
 
@@ -166,20 +197,24 @@ def inventory_page():
     sync_inventory_with_bom()
     df = load_full_inventory_df()
 
+    # Visual: append unit to ingredient for display only
     df_disp = df.copy()
     df_disp["Ingredient"] = [
         f"{ing} ({unit})" if unit else ing
         for ing, unit in zip(df["Ingredient"], df["Unit"])
     ]
 
-    st.markdown("""
+    st.markdown(
+        """
         <style>
         .stDataFrame, .stDataEditor {
             height: auto !important;
             max-height: none !important;
         }
         </style>
-    """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True,
+    )
 
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
@@ -203,14 +238,13 @@ def inventory_page():
                 st.rerun()
             else:
                 st.error("❌ Invalid ID or password.")
-
         st.dataframe(df_disp, use_container_width=True, height=800)
         return
 
     if st.session_state.inventory_edit_enabled:
         st.success("✅ Editing enabled. Update inventory values below.")
         edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True, height=800)
-        edited["Ingredient"] = df["Ingredient"]
+        edited["Ingredient"] = df["Ingredient"]  # map back to raw names
 
         if st.button("💾 Save Inventory"):
             save_inventory_df(edited)
