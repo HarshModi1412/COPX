@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timedelta
+
 from db import init_db, fetch_df, query_db
 from bom_handler import ensure_bom_seeded, INGREDIENT_UNITS, DEFAULT_BOM
 
@@ -55,53 +57,62 @@ def load_full_inventory_df():
         df = pd.DataFrame(columns=["Ingredient", "Quantity", "Unit", "Safety Stock"])
     return df
 
-from datetime import datetime, timedelta
+# --- Logging helpers ---
+def _get_self_life_days(ingredient: str) -> int | None:
+    """Fetch self_life_days from SQL Server table `self_life` for the given ingredient."""
+    try:
+        df = fetch_df("SELECT self_life_days FROM self_life WHERE ingredient = ?", (ingredient,))
+        if df is not None and not df.empty:
+            val = df.iloc[0]["self_life_days"]
+            if pd.notna(val):
+                return int(val)
+    except Exception:
+        # Swallow and treat as missing
+        pass
+    return None
 
-def log_inventory_change(ingredient, old_qty, new_qty, conn):
+def log_inventory_change(ingredient, old_qty, new_qty):
     """
     Insert inventory change into logs, including use_before date.
-    Shelf life is fetched from the SQL Server `self_life` table.
+    Shelf life is fetched from SQL Server table `self_life` (column: self_life_days).
     """
+    # If the item didn't exist before (None), we skip logging the first insert.
     if old_qty is None:
         return
 
     try:
-        diff = float(new_qty) - float(old_qty)
+        old_q = float(old_qty)
+        new_q = float(new_qty) if pd.notna(new_qty) else 0.0
     except (TypeError, ValueError):
         return
 
+    diff = new_q - old_q
     if diff == 0:
         return
 
     change_type = "Added" if diff > 0 else "Wasted"
 
-    # Fetch shelf life days from DB
-    cursor = conn.cursor()
-    cursor.execute("SELECT self_life_days FROM self_life WHERE ingredient = ?", (ingredient,))
-    row = cursor.fetchone()
-
+    # Get shelf life days from DB and compute use_before
+    days = _get_self_life_days(str(ingredient))
     use_before = None
-    if row and row[0] and row[0] > 0:
-        use_before = (datetime.now() + timedelta(days=row[0])).date()
+    if days is not None and days > 0:
+        ub_date = (datetime.now() + timedelta(days=int(days))).date()
+        # Pass a plain string (YYYY-MM-DD) to avoid driver dtype issues
+        use_before = ub_date.isoformat()
 
     # Insert log entry
-    cursor.execute("""
+    query_db("""
         INSERT INTO inventory_logs 
             (ingredient, change_type, quantity_changed, old_quantity, new_quantity, use_before)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         str(ingredient),
-        change_type,
-        abs(diff),
-        float(old_qty),
-        float(new_qty),
+        str(change_type),
+        float(abs(diff)),
+        float(old_q),
+        float(new_q),
         use_before
     ))
-
-    conn.commit()
-    cursor.close()
-
-
 
 def save_inventory_df(df: pd.DataFrame):
     """Upsert inventory changes and log them."""
@@ -111,11 +122,11 @@ def save_inventory_df(df: pd.DataFrame):
         unit = row.get("Unit", "") or ""
         safety_stock = float(row.get("Safety Stock", 0.0)) if pd.notna(row.get("Safety Stock", 0.0)) else 0.0
 
-        # Get old quantity
+        # Get old quantity (None if not found)
         old_qty_row = fetch_df("SELECT quantity FROM inventory WHERE ingredient = ?", (ing,))
         old_qty = old_qty_row.iloc[0]["quantity"] if old_qty_row is not None and not old_qty_row.empty else None
 
-        # Update inventory
+        # Update / insert inventory
         query_db("""
             MERGE inventory AS target
             USING (SELECT ? AS ingredient, ? AS quantity, ? AS unit, ? AS safety_stock) AS source
@@ -128,25 +139,32 @@ def save_inventory_df(df: pd.DataFrame):
             WHEN NOT MATCHED THEN
                 INSERT (ingredient, quantity, unit, safety_stock)
                 VALUES (source.ingredient, source.quantity, source.unit, source.safety_stock);
-        """, (ing, new_qty, unit, safety_stock))
+        """, (str(ing), float(new_qty), str(unit), float(safety_stock)))
 
-        # Log change if quantity differs
+        # Log change if quantity differs (skips first-time inserts where old_qty is None)
         log_inventory_change(ing, old_qty, new_qty)
 
 # --- UI Page ---
 def inventory_page():
+    # Ensure DB schema is ready (including inventory_logs created in db.init_db)
     init_db()
+
     st.header("📦 Inventory Management")
 
+    # Ensure BOM ingredients exist (no deletion of extras)
     sync_inventory_with_bom()
+
+    # Load data
     df = load_full_inventory_df()
 
+    # Display names with units (purely visual)
     df_disp = df.copy()
     df_disp["Ingredient"] = [
         f"{ing} ({unit})" if unit else ing
         for ing, unit in zip(df["Ingredient"], df["Unit"])
     ]
 
+    # Make table taller
     st.markdown("""
         <style>
         .stDataFrame, .stDataEditor {
@@ -156,16 +174,19 @@ def inventory_page():
         </style>
     """, unsafe_allow_html=True)
 
+    # Session state
     if "inventory_edit_enabled" not in st.session_state:
         st.session_state.inventory_edit_enabled = False
     if "login_prompt" not in st.session_state:
         st.session_state.login_prompt = False
 
+    # Enable editing button
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         if st.button("🔓 Enable Editing"):
             st.session_state.login_prompt = True
             st.rerun()
 
+    # Login form
     if st.session_state.login_prompt and not st.session_state.inventory_edit_enabled:
         with st.form("auth_form", clear_on_submit=True):
             uid = st.text_input("Enter User ID")
@@ -182,9 +203,12 @@ def inventory_page():
         st.dataframe(df_disp, use_container_width=True, height=800)
         return
 
+    # Editing mode
     if st.session_state.inventory_edit_enabled:
         st.success("✅ Editing enabled. Update inventory values below.")
         edited = st.data_editor(df_disp, num_rows="fixed", use_container_width=True, height=800)
+
+        # Map visual name back to raw Ingredient
         edited["Ingredient"] = df["Ingredient"]
 
         if st.button("💾 Save Inventory"):
@@ -193,8 +217,6 @@ def inventory_page():
             st.session_state.inventory_edit_enabled = False
             st.rerun()
 
+    # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
-
-
-
