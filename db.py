@@ -1,12 +1,13 @@
 import os
 import pandas as pd
 import pyodbc
+from datetime import datetime
 
-# Remote SQL Server connection details (you can store these in environment variables for security)
+# Remote SQL Server connection details
 SERVER = "den1.mssql7.gear.host"
 DATABASE = "billinghistory"
 USERNAME = "billinghistory"
-PASSWORD = "Pk0Z-57_avQe"  # Change to os.environ.get("DB_PASSWORD") for security
+PASSWORD = "Pk0Z-57_avQe"  
 
 def connect():
     """Establish connection to remote SQL Server database."""
@@ -40,7 +41,22 @@ def init_db():
         CREATE TABLE inventory (
             ingredient NVARCHAR(255) PRIMARY KEY,
             quantity FLOAT NOT NULL DEFAULT 0,
-            unit NVARCHAR(50)
+            unit NVARCHAR(50),
+            safety_stock FLOAT DEFAULT 0
+        )
+    """)
+
+    # Inventory Logs
+    cur.execute("""
+        IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='inventory_logs' AND xtype='U')
+        CREATE TABLE inventory_logs (
+            log_id INT IDENTITY(1,1) PRIMARY KEY,
+            ingredient NVARCHAR(255),
+            change_type NVARCHAR(50),   -- Added / Wasted
+            quantity_changed FLOAT,
+            old_quantity FLOAT,
+            new_quantity FLOAT,
+            timestamp DATETIME DEFAULT GETDATE()
         )
     """)
 
@@ -112,7 +128,7 @@ def upsert_inventory_row(ingredient, unit):
         WHEN MATCHED THEN
             UPDATE SET unit = source.unit
         WHEN NOT MATCHED THEN
-            INSERT (ingredient, quantity, unit) VALUES (source.ingredient, 0, source.unit);
+            INSERT (ingredient, quantity, unit, safety_stock) VALUES (source.ingredient, 0, source.unit, 0);
     """, (ingredient, unit))
 
 def replace_inventory(df):
@@ -120,14 +136,12 @@ def replace_inventory(df):
     conn = connect()
     cur = conn.cursor()
     try:
-        # Clear existing table
         cur.execute("TRUNCATE TABLE inventory")
 
-        # Insert new rows
         for _, row in df.iterrows():
             cur.execute(
-                "INSERT INTO inventory (ingredient, quantity, unit) VALUES (?, ?, ?)",
-                (row["ingredient"], row["quantity"], row["unit"])
+                "INSERT INTO inventory (ingredient, quantity, unit, safety_stock) VALUES (?, ?, ?, ?)",
+                (row["ingredient"], row["quantity"], row["unit"], row.get("safety_stock", 0.0))
             )
         conn.commit()
     finally:
