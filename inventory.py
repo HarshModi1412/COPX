@@ -88,17 +88,17 @@ def log_inventory_change(ingredient, old_qty, new_qty):
 
         change_type = "Added" if diff > 0 else "Wasted"
 
-        # ✅ Calculate use_before date
-        shelf_life = SHELF_LIFE_DAYS.get(str(ingredient), None)
+        # ✅ Fetch shelf life days from self_life table
+        shelf_life = _get_self_life_days(str(ingredient))
         use_before = None
         if shelf_life and shelf_life > 0:
-            use_before = (datetime.now() + timedelta(days=shelf_life)).strftime("%Y-%m-%d")  
+            use_before = (datetime.now() + timedelta(days=shelf_life)).date()
 
-        # ✅ Ensure params match columns
+        # ✅ Prepare parameters
         params = (
             str(ingredient),
             change_type,
-            abs(diff),
+            float(abs(diff)),
             old_qty,
             new_qty,
             use_before
@@ -219,4 +219,5 @@ def inventory_page():
     # Read-only view
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
+
 
