@@ -57,34 +57,49 @@ def load_full_inventory_df():
 
 from datetime import datetime, timedelta
 
-def log_inventory_change(ingredient, old_qty, new_qty):
-    """Insert inventory change into logs, including use_before date."""
+def log_inventory_change(ingredient, old_qty, new_qty, conn):
+    """
+    Insert inventory change into logs, including use_before date.
+    Shelf life is fetched from the SQL Server `self_life` table.
+    """
     if old_qty is None:
         return
-    diff = float(new_qty) - float(old_qty)
+
+    try:
+        diff = float(new_qty) - float(old_qty)
+    except (TypeError, ValueError):
+        return
+
     if diff == 0:
         return
 
     change_type = "Added" if diff > 0 else "Wasted"
 
-    # Calculate use_before date
-    shelf_life = SHELF_LIFE_DAYS.get(str(ingredient), None)
-    use_before = None
-    if shelf_life and shelf_life > 0:
-        use_before = (datetime.now() + timedelta(days=shelf_life)).date()
+    # Fetch shelf life days from DB
+    cursor = conn.cursor()
+    cursor.execute("SELECT self_life_days FROM self_life WHERE ingredient = ?", (ingredient,))
+    row = cursor.fetchone()
 
-    query_db("""
+    use_before = None
+    if row and row[0] and row[0] > 0:
+        use_before = (datetime.now() + timedelta(days=row[0])).date()
+
+    # Insert log entry
+    cursor.execute("""
         INSERT INTO inventory_logs 
             (ingredient, change_type, quantity_changed, old_quantity, new_quantity, use_before)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         str(ingredient),
-        str(change_type),
-        float(abs(diff)),
+        change_type,
+        abs(diff),
         float(old_qty),
         float(new_qty),
         use_before
     ))
+
+    conn.commit()
+    cursor.close()
 
 
 
@@ -180,5 +195,6 @@ def inventory_page():
 
     if not st.session_state.inventory_edit_enabled and not st.session_state.login_prompt:
         st.dataframe(df_disp, use_container_width=True, height=800)
+
 
 
